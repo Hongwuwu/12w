@@ -201,29 +201,29 @@ def print_banner(config):
     mqtt_config = config["local_mqtt"]
     control_config = config["control"]
     print("=" * 50)
-    print("  Dify PLC AI Chat Terminal")
+    print("  DeepSeek PLC AI Chat Terminal (MW21/MW22)")
     print(f"  Version: {VERSION}")
     print(f"  Device:  {control_config['device_sn']}")
     print(f"  MQTT:    {mqtt_config['host']}:{mqtt_config['port']}")
     print("-" * 50)
     print("  Commands:")
     print('    "查询温度"     - Ask about current temperature')
-    print('    "自动模式"     - Switch to auto control mode')
-    print('    "自定义模式"   - Switch to manual control mode')
+    print('    "自动模式"     - Switch to auto (MW21=1,MW22=0)')
+    print('    "手动模式"     - Switch to manual (MW21=0,MW22=1)')
     print('    "开" / "关"    - Control PLC (manual mode only)')
     print("    Ctrl+C        - Exit")
     print("=" * 50)
 
 
-def print_status(mw0, mw20, mode):
+def print_status(mw0, mw20, mw21, mw22, mode):
     temp = mw0 / 100.0 if mw0 is not None else None
     print(
-        f"\n  [Status] Temperature: {temp} C (MW0={mw0}) | Control: MW20={mw20} | Mode: {mode}"
+        f"\n  [Status] Temp: {temp} C | Light: MW20={mw20} | Auto: MW21={mw21} | Manual: MW22={mw22} | Mode: {mode}"
     )
 
 
 def main():
-    global running, local_connected, latest_payload, latest_mw0, latest_mw20
+    global running, local_connected, latest_payload, latest_mw0, latest_mw20, latest_mw21, latest_mw22
     global latest_payload_at, current_mode
 
     signal.signal(signal.SIGINT, stop_handler)
@@ -264,20 +264,28 @@ def main():
         log(f"LOCAL MQTT disconnected rc={rc}")
 
     def on_message(mqtt_client, userdata, msg):
-        global latest_payload, latest_mw0, latest_mw20, latest_payload_at
+        global latest_payload, latest_mw0, latest_mw20, latest_mw21, latest_mw22, latest_payload_at
         payload_text = msg.payload.decode("utf-8", errors="replace")
         topic = msg.topic
 
         with state_lock:
             if topic == mqtt_config["input_topic"]:
-                _, mw0 = parse_input_payload(payload_text)
+                _, mw0, mw21, mw22 = parse_input_payload(payload_text)
                 latest_payload = payload_text
                 latest_mw0 = mw0
+                if mw21 is not None:
+                    latest_mw21 = mw21
+                if mw22 is not None:
+                    latest_mw22 = mw22
                 latest_payload_at = time.time()
             elif topic == mqtt_config["command_topic"]:
-                mw20 = parse_command_payload(payload_text)
+                mw20, mw21, mw22 = parse_command_payload(payload_text)
                 if mw20 is not None:
                     latest_mw20 = mw20
+                if mw21 is not None:
+                    latest_mw21 = mw21
+                if mw22 is not None:
+                    latest_mw22 = mw22
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
@@ -312,10 +320,12 @@ def main():
             with state_lock:
                 mw0 = latest_mw0
                 mw20 = latest_mw20
+                mw21 = latest_mw21
+                mw22 = latest_mw22
 
             current_mode = load_mode_state(state_file)
 
-            print_status(mw0, mw20, current_mode)
+            print_status(mw0, mw20, mw21, mw22, current_mode)
             try:
                 user_input = input("\n> ").strip()
             except EOFError:
