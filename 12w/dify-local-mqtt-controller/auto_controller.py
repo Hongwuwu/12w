@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-Dify 本地 MQTT 自动控制器（Mode 感知版）
+DeepSeek 本地 MQTT 自动控制器（Mode 感知版）
 
 作用：
 1. 连接客户现场的内网 MQTT Broker。
-2. 订阅 PLC 上报 topic，解析 MW0。
-3. 调用 Dify Workflow API（工作流A），把 MW0 传给 Dify 做判断。
-4. 读取 Dify 返回的 mw20/action，发布控制命令到 MQTT。
+2. 订阅 PLC 上报 topic，解析 MW0（温度）。
+3. 调用 DeepSeek API，把温度传给 AI 做开关判断。
+4. 解析 AI 返回的 mw20，发布控制命令到 MQTT。
 5. 通过 controller_state.json 感知全局模式，manual 模式下自动休眠。
 
 注意：
@@ -43,7 +43,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 CONFIG_PATH = Path(os.getenv("CONTROLLER_CONFIG", "config.json"))
 
-VERSION = "local-api-controller-20260518-mode-patch"
+VERSION = "deepseek-auto-controller-20260526"
 
 running = True
 local_connected = False
@@ -67,10 +67,10 @@ DEFAULT_CONFIG = {
         "command_topic": "bistu11/MQTTSetValueCommand",
         "mqtt_version": "3.1.1",
     },
-    "dify": {
-        "api_url": "https://api.dify.ai/v1/workflows/run",
-        "api_key": "PASTE_DIFY_API_KEY_HERE",
-        "user": "mqtt-local-controller",
+    "deepseek": {
+        "api_key": "PASTE_DEEPSEEK_API_KEY_HERE",
+        "api_url": "https://api.deepseek.com/v1/chat/completions",
+        "model": "deepseek-chat",
         "timeout_sec": 30,
     },
     "control": {
@@ -89,28 +89,36 @@ def stop_handler(signum, frame):
     log("Stop signal received, exiting...")
 
 
-def call_dify(config, payload_text, payload_json, mw0, seq):
-    dify_config = config["dify"]
-    api_key = dify_config.get("api_key", "")
-    if not api_key or api_key == "PASTE_DIFY_API_KEY_HERE":
-        raise RuntimeError("dify.api_key is not configured in config.json")
+AUTO_SYSTEM_PROMPT = """\
+你是PLC控制助手，名叫"小P"。你的任务是判断当前温度是否需要开启设备（灯光/散热）。
 
-    bridge_iso = datetime.now(timezone.utc).isoformat()
+规则：
+- 温度 > 30度：建议开启设备（mw20=1），帮助散热
+- 温度 <= 30度：建议关闭设备（mw20=0），节省能源
+- 如果温度数据异常（如null或负数），保持当前状态不变（mw20=-1表示保持不变）
+
+你必须只回复一个JSON对象，不要任何其他文字：
+{"mw20": 1, "reason": "简短中文原因"}"""
+
+
+def _call_deepseek_api(config, messages):
+    """通用 DeepSeek API 调用。"""
+    ds_config = config["deepseek"]
+    api_key = ds_config.get("api_key", "")
+    if not api_key or api_key == "PASTE_DEEPSEEK_API_KEY_HERE":
+        raise RuntimeError("deepseek.api_key is not configured in config.json")
+
     body = {
-        "inputs": {
-            "mqtt_payload_raw": payload_text,
-            "mqtt_payload": payload_json,
-            "mw0": mw0,
-            "bridge_seq": seq,
-            "bridge_time": bridge_iso,
-        },
-        "response_mode": "blocking",
-        "user": dify_config.get("user", "mqtt-local-controller"),
+        "model": ds_config.get("model", "deepseek-chat"),
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": 200,
+        "response_format": {"type": "json_object"},
     }
 
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        dify_config["api_url"],
+        ds_config["api_url"],
         data=data,
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -119,62 +127,47 @@ def call_dify(config, payload_text, payload_json, mw0, seq):
         method="POST",
     )
 
-    timeout = float(dify_config.get("timeout_sec", 30))
+    timeout = float(ds_config.get("timeout_sec", 30))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_text = response.read().decode("utf-8", errors="replace")
+            return json.loads(response.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
         error_text = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Dify API HTTP {exc.code}: {error_text}") from exc
-
-    result = json.loads(response_text)
-    data_obj = result.get("data") or {}
-    status = data_obj.get("status")
-    if status and status != "succeeded":
-        raise RuntimeError(
-            f"Dify workflow status={status}, error={data_obj.get('error')}"
-        )
-
-    outputs = data_obj.get("outputs") or result.get("outputs") or {}
-    return outputs, result
+        raise RuntimeError(f"DeepSeek API HTTP {exc.code}: {error_text}") from exc
 
 
-def normalize_command(outputs):
-    if not isinstance(outputs, dict):
-        return None, "outputs is not an object"
+def call_deepseek_auto(config, mw0):
+    """调用 DeepSeek 判断是否需要开启设备。返回 (mw20, reason)。"""
+    temp = mw0 / 100.0 if mw0 is not None else None
+    if temp is None:
+        return None, "no temperature data"
 
-    command_payload = outputs.get("command_payload") or outputs.get("mqtt_payload")
-    if command_payload:
-        if isinstance(command_payload, str):
-            return command_payload, "command_payload"
-        return (
-            json.dumps(command_payload, ensure_ascii=False, separators=(",", ":")),
-            "command_payload",
-        )
+    user_msg = f"当前温度：{temp:.1f}度（MW0={mw0}）。请判断是否需要开启设备。"
 
-    mw20 = outputs.get("mw20")
-    if mw20 is None:
-        mw20 = outputs.get("MW20")
-    if mw20 is not None:
-        try:
-            value = int(mw20)
-        except Exception:
-            return None, f"invalid mw20={mw20!r}"
-        if value not in (0, 1):
-            return None, f"mw20 must be 0 or 1, got {value}"
-        return build_command_payload(value, "bistu11"), "mw20"
+    result = _call_deepseek_api(config, [
+        {"role": "system", "content": AUTO_SYSTEM_PROMPT},
+        {"role": "user", "content": user_msg},
+    ])
 
-    action = outputs.get("action") or outputs.get("result")
-    if isinstance(action, str):
-        action_lower = action.strip().lower()
-        if "open" in action_lower or action_lower in ("1", "on", "true"):
-            return build_command_payload(1, "bistu11"), f"action={action}"
-        if "close" in action_lower or action_lower in ("0", "off", "false"):
-            return build_command_payload(0, "bistu11"), f"action={action}"
-        if action_lower in ("none", "no_action", "noop", ""):
-            return None, f"no action={action}"
+    content = result["choices"][0]["message"]["content"]
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"DeepSeek returned invalid JSON: {content}")
 
-    return None, "no command in Dify outputs"
+    mw20 = parsed.get("mw20")
+    reason = parsed.get("reason", "")
+
+    if mw20 is None or mw20 == -1:
+        return None, f"no action: {reason}"
+    try:
+        mw20 = int(mw20)
+    except (ValueError, TypeError):
+        return None, f"invalid mw20={mw20}"
+    if mw20 not in (0, 1):
+        return None, f"mw20 must be 0 or 1, got {mw20}"
+
+    return mw20, reason
 
 
 def main():
@@ -237,10 +230,7 @@ def main():
     client.on_disconnect = on_disconnect
     client.on_message = on_message
 
-    log(f"Dify Local MQTT Controller version={VERSION}")
-    log(
-        "Dify MQTT Trigger and Dify MQTT Publisher should be disabled in the workflow."
-    )
+    log(f"DeepSeek Auto Controller version={VERSION}")
     log(f"State file: {STATE_FILE_PATH.resolve()} (mode-aware patch enabled)")
     log(f"Connecting LOCAL MQTT {mqtt_config['host']}:{mqtt_config['port']}")
 
@@ -281,32 +271,29 @@ def main():
         ):
             continue
 
-        payload_json, parsed_mw0 = parse_input_payload(payload_text)
         if mw0 is None:
+            _, parsed_mw0 = parse_input_payload(payload_text)
             mw0 = parsed_mw0
         bridge_seq += 1
 
         try:
-            log(f"Calling Dify API seq={bridge_seq} MW0={mw0}")
-            outputs, raw_result = call_dify(
-                config, payload_text, payload_json, mw0, bridge_seq
-            )
-            command_payload, reason = normalize_command(outputs)
-            log(
-                f"Dify outputs seq={bridge_seq} reason={reason} outputs={json.dumps(outputs, ensure_ascii=False)}"
-            )
+            log(f"Calling DeepSeek seq={bridge_seq} MW0={mw0}")
+            mw20_value, reason = call_deepseek_auto(config, mw0)
+            log(f"DeepSeek response seq={bridge_seq} mw20={mw20_value} reason={reason}")
         except Exception as exc:
-            log(f"Dify call failed seq={bridge_seq}: {exc}")
+            log(f"DeepSeek call failed seq={bridge_seq}: {exc}")
             last_processed_payload = payload_text
             continue
 
         last_processed_payload = payload_text
 
-        if not command_payload:
+        if mw20_value is None:
             if control_config.get("publish_on_no_action", False):
-                command_payload = build_command_payload(0, "bistu11")
+                mw20_value = 0
             else:
                 continue
+
+        command_payload = build_command_payload(mw20_value, "bistu11")
 
         if (
             control_config.get("dedup_command", True)

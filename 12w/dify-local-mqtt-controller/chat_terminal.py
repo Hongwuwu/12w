@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Dify PLC AI Chat Terminal
+DeepSeek PLC AI Chat Terminal
 
 作用：
 1. 连接本地 MQTT Broker，实时缓存 PLC 数据（MW0、MW20）。
 2. 提供交互式命令行，用户输入自然语言查询或控制指令。
-3. 调用 Dify 工作流 B（deepseek），获取 AI 回答 + 结构化指令（mode/mw20）。
+3. 调用 DeepSeek API，获取 AI 回答 + 结构化指令（mode/mw20）。
 4. 切换全局运行模式（auto / manual），通过 controller_state.json 与原控制器共享。
-5. 在 manual 模式下，根据 Dify 返回的 mw20 直接发 MQTT 命令到 PLC。
+5. 在 manual 模式下，根据 AI 返回的 mw20 直接发 MQTT 命令到 PLC。
 
 注意：
 - 本程序需要 Python 3 和 paho-mqtt。
@@ -41,7 +41,7 @@ from common import (
 
 CONFIG_PATH = Path(os.getenv("CHAT_CONFIG", "config.json"))
 
-VERSION = "chat-terminal-20260518"
+VERSION = "deepseek-chat-terminal-20260526"
 
 running = True
 local_connected = False
@@ -62,10 +62,10 @@ DEFAULT_CONFIG = {
         "command_topic": "bistu11/MQTTSetValueCommand",
         "mqtt_version": "3.1.1",
     },
-    "dify_chat": {
-        "api_url": "http://192.168.31.197/v1/workflows/run",
-        "api_key": "PASTE_DIFY_CHAT_API_KEY_HERE",
-        "user": "mqtt-chat-terminal",
+    "deepseek": {
+        "api_key": "PASTE_DEEPSEEK_API_KEY_HERE",
+        "api_url": "https://api.deepseek.com/v1/chat/completions",
+        "model": "deepseek-chat",
         "timeout_sec": 60,
     },
     "control": {
@@ -82,26 +82,63 @@ def stop_handler(signum, frame):
     log("Stop signal received, exiting...")
 
 
-def call_dify_chat(config, mw0, user_query, current_mw20, current_mode):
-    dify_config = config["dify_chat"]
-    api_key = dify_config.get("api_key", "")
-    if not api_key or api_key == "PASTE_DIFY_CHAT_API_KEY_HERE":
-        raise RuntimeError("dify_chat.api_key is not configured in config.json")
+CHAT_SYSTEM_PROMPT = """\
+你是PLC控制助手，名叫"小P"。你负责帮助用户查询PLC状态和控制设备。
+
+当前信息：
+- 温度：{temp} 度
+- 控制状态：MW20={mw20}（0=关闭, 1=开启）
+- 运行模式：{mode}（auto=自动, manual=手动）
+
+用户输入：{user_query}
+
+请根据以上信息，生成一段友好的中文回复，并判断用户意图。
+
+你必须只回复一个JSON对象，不要任何其他文字：
+{{"text": "你的中文回复", "mode": null, "mw20": null}}
+
+规则：
+- "自动模式"/"自动" → mode="auto", text简短确认切换结果
+- "手动模式"/"手动"/"自定义模式"/"自定义" → mode="manual", text简短确认切换结果
+- manual模式下："开"/"打开"/"启动"/"开启" → mw20=1, text告知已开启
+- manual模式下："关"/"关闭"/"停止" → mw20=0, text告知已关闭
+- auto模式下如果用户试图手动控制 → 提示先切到手动模式, mode=null, mw20=null
+- 查询温度/状态 → text告知当前温度和状态, mode=null, mw20=null
+- "查询"/"状态"/"温度" → 同查询
+- 其他闲聊 → 只回复text, mode=null, mw20=null
+- 回复要简短友好，用中文"""
+
+
+def call_deepseek_chat(config, mw0, user_query, current_mw20, current_mode):
+    ds_config = config["deepseek"]
+    api_key = ds_config.get("api_key", "")
+    if not api_key or api_key == "PASTE_DEEPSEEK_API_KEY_HERE":
+        raise RuntimeError("deepseek.api_key is not configured in config.json")
+
+    temp = mw0 / 100.0 if mw0 is not None else "未知"
+    mode_label = "自动" if current_mode == "auto" else "手动"
+
+    system_prompt = CHAT_SYSTEM_PROMPT.format(
+        temp=temp,
+        mw20=current_mw20,
+        mode=mode_label,
+        user_query=user_query,
+    )
 
     body = {
-        "inputs": {
-            "mw0": mw0,
-            "user_query": user_query,
-            "current_mw20": current_mw20,
-            "current_mode": current_mode,
-        },
-        "response_mode": "blocking",
-        "user": dify_config.get("user", "mqtt-chat-terminal"),
+        "model": ds_config.get("model", "deepseek-chat"),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_query},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 500,
+        "response_format": {"type": "json_object"},
     }
 
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
-        dify_config["api_url"],
+        ds_config["api_url"],
         data=data,
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -110,24 +147,21 @@ def call_dify_chat(config, mw0, user_query, current_mw20, current_mode):
         method="POST",
     )
 
-    timeout = float(dify_config.get("timeout_sec", 60))
+    timeout = float(ds_config.get("timeout_sec", 60))
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            response_text = response.read().decode("utf-8", errors="replace")
+            result = json.loads(response.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
         error_text = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Dify API HTTP {exc.code}: {error_text}") from exc
+        raise RuntimeError(f"DeepSeek API HTTP {exc.code}: {error_text}") from exc
 
-    result = json.loads(response_text)
-    data_obj = result.get("data") or {}
-    status = data_obj.get("status")
-    if status and status != "succeeded":
-        raise RuntimeError(
-            f"Dify workflow status={status}, error={data_obj.get('error')}"
-        )
+    content = result["choices"][0]["message"]["content"]
+    try:
+        outputs = json.loads(content)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"DeepSeek returned invalid JSON: {content}")
 
-    outputs = data_obj.get("outputs") or result.get("outputs") or {}
-    return outputs, result
+    return outputs
 
 
 def publish_command(client, mqtt_config, device_sn, mw20_value):
@@ -236,7 +270,7 @@ def main():
     client.on_disconnect = on_disconnect
     client.on_message = on_message
 
-    log(f"Dify Chat Terminal version={VERSION}")
+    log(f"DeepSeek Chat Terminal version={VERSION}")
     log(f"Connecting LOCAL MQTT {mqtt_config['host']}:{mqtt_config['port']}")
 
     client.connect_async(
@@ -290,14 +324,14 @@ def main():
                 continue
 
             seq += 1
-            print(f"  [Thinking] Calling Dify API... (seq={seq})")
+            print(f"  [Thinking] Calling DeepSeek... (seq={seq})")
 
             try:
-                outputs, raw_result = call_dify_chat(
+                outputs = call_deepseek_chat(
                     config, mw0, user_input, mw20 or 0, current_mode
                 )
             except Exception as exc:
-                print(f"  [Error] Dify API call failed: {exc}")
+                print(f"  [Error] DeepSeek API call failed: {exc}")
                 continue
 
             text = outputs.get("test") or outputs.get("text") or "(no response)"

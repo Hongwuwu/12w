@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Dify Local MQTT Controller - 统一入口
+DeepSeek Local MQTT Controller - 统一入口
 
 用法：
     python main.py                 同时启动自动控制器 + 聊天终端（两个线程）
@@ -44,7 +44,7 @@ def main():
             print(f"       python main.py          (run both)")
             sys.exit(1)
     else:
-        log("Starting Dify Local MQTT Controller (both components)...")
+        log("Starting DeepSeek Local MQTT Controller (both components)...")
         log("Auto controller: background thread")
         log("Chat terminal:   foreground (interactive)")
         log("Press Ctrl+C in the chat terminal to exit both.")

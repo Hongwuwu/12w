@@ -8,16 +8,10 @@
         "command_topic": "bistu11/MQTTSetValueCommand",
         "mqtt_version": "3.1.1"
     },
-    "dify": {
-        "api_url": "http://192.168.31.197/v1/workflows/run",
-        "api_key": "PASTE_DIFY_AUTO_API_KEY_HERE",
-        "user": "mqtt-local-controller",
-        "timeout_sec": 30
-    },
-    "dify_chat": {
-        "api_url": "http://192.168.31.197/v1/workflows/run",
-        "api_key": "PASTE_DIFY_CHAT_API_KEY_HERE",
-        "user": "mqtt-chat-terminal",
+    "deepseek": {
+        "api_key": "PASTE_DEEPSEEK_API_KEY_HERE",
+        "api_url": "https://api.deepseek.com/v1/chat/completions",
+        "model": "deepseek-chat",
         "timeout_sec": 60
     },
     "control": {
