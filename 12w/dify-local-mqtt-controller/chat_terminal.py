@@ -49,6 +49,8 @@ state_lock = threading.Lock()
 latest_payload = None
 latest_mw0 = None
 latest_mw20 = None
+latest_mw21 = None
+latest_mw22 = None
 latest_payload_at = 0.0
 current_mode = "auto"
 
@@ -88,29 +90,35 @@ CHAT_SYSTEM_PROMPT = """\
 当前信息：
 - 温度：{temp} 度
 - 控制状态：MW20={mw20}（0=关闭, 1=开启）
+- 自动标志：MW21={mw21}（1=自动模式激活）
+- 手动标志：MW22={mw22}（1=手动模式激活）
 - 运行模式：{mode}（auto=自动, manual=手动）
+
+重要：PLC内部自动模式(MW21)优先级高于手动模式。切换到手动模式时，
+MW21必须设为0，MW22设为1，否则PLC不会接受手动指令。
 
 用户输入：{user_query}
 
 请根据以上信息，生成一段友好的中文回复，并判断用户意图。
 
-你必须只回复一个JSON对象，不要任何其他文字：xianza
+你必须只回复一个JSON对象，不要任何其他文字：
 {{"text": "你的中文回复", "mode": null, "mw20": null}}
 
 规则：
-- 如果是在“自动模式”下要求实现“打开”或者“关闭”，那么由你先实现切换到“手动模式”然后实现要求的功能
-- "自动模式"/"自动" → mode="auto", text简短确认切换结果
-- "手动模式"/"手动"/"自定义模式"/"自定义" → mode="manual", text简短确认切换结果
+- 如果是在"自动模式"下要求实现"打开"或者"关闭"，那么由你先实现切换到"手动模式"然后实现要求的功能
+- "自动模式"/"自动" → mode="auto", text简短确认切换结果（系统会设MW21=1,MW22=0）
+- "手动模式"/"手动"/"自定义模式"/"自定义" → mode="manual", text简短确认切换结果（系统会设MW21=0,MW22=1让PLC接受手动指令）
 - manual模式下："开"/"打开"/"启动"/"开启" → mw20=1, text告知已开启
 - manual模式下："关"/"关闭"/"停止" → mw20=0, text告知已关闭
 - auto模式下如果用户试图手动控制 → 提示先切到手动模式, mode=null, mw20=null
-- 查询温度/状态 → text告知当前温度和状态, mode=null, mw20=null
+- 查询温度/状态 → text告知当前温度和状态（含MW21/MW22）, mode=null, mw20=null
 - "查询"/"状态"/"温度" → 同查询
 - 其他闲聊 → 只回复text, mode=null, mw20=null
-- 回复要简短友好，用中文"""
+- 回复要简短友好，用中文
+"""
 
 
-def call_deepseek_chat(config, mw0, user_query, current_mw20, current_mode):
+def call_deepseek_chat(config, mw0, user_query, current_mw20, current_mw21, current_mw22, current_mode):
     ds_config = config["deepseek"]
     api_key = ds_config.get("api_key", "")
     if not api_key or api_key == "PASTE_DEEPSEEK_API_KEY_HERE":
@@ -122,6 +130,8 @@ def call_deepseek_chat(config, mw0, user_query, current_mw20, current_mode):
     system_prompt = CHAT_SYSTEM_PROMPT.format(
         temp=temp,
         mw20=current_mw20,
+        mw21=current_mw21 if current_mw21 is not None else "?",
+        mw22=current_mw22 if current_mw22 is not None else "?",
         mode=mode_label,
         user_query=user_query,
     )
@@ -165,8 +175,10 @@ def call_deepseek_chat(config, mw0, user_query, current_mw20, current_mode):
     return outputs
 
 
-def publish_command(client, mqtt_config, device_sn, mw20_value):
-    command_payload = build_command_payload(mw20_value, device_sn)
+def publish_command(client, mqtt_config, device_sn, mw20_value, mw21=None, mw22=None):
+    command_payload = build_command_payload(
+        device_sn, mw20=mw20_value, mw21=mw21, mw22=mw22
+    )
     try:
         info = client.publish(
             mqtt_config["command_topic"], command_payload, qos=0, retain=False
@@ -174,7 +186,7 @@ def publish_command(client, mqtt_config, device_sn, mw20_value):
         info.wait_for_publish(timeout=5)
         if info.is_published():
             log(
-                f"Published command MW20={mw20_value} topic={mqtt_config['command_topic']}"
+                f"Published MW20={mw20_value} MW21={mw21} MW22={mw22} topic={mqtt_config['command_topic']}"
             )
             return True
         else:

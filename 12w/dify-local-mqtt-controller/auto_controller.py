@@ -50,6 +50,8 @@ local_connected = False
 state_lock = threading.Lock()
 latest_payload = None
 latest_mw0 = None
+latest_mw21 = None
+latest_mw22 = None
 latest_payload_changed_at = 0.0
 last_processed_payload = None
 last_command_payload = None
@@ -171,7 +173,7 @@ def call_deepseek_auto(config, mw0):
 
 
 def main():
-    global running, local_connected, latest_payload, latest_mw0
+    global running, local_connected, latest_payload, latest_mw0, latest_mw21, latest_mw22
     global latest_payload_changed_at, last_processed_payload, last_command_payload
     global bridge_seq, STATE_FILE_PATH
 
@@ -184,6 +186,7 @@ def main():
     config = load_config(CONFIG_PATH, DEFAULT_CONFIG)
     mqtt_config = config["local_mqtt"]
     control_config = config["control"]
+    device_sn = control_config.get("device_sn", "bistu11")
 
     state_file_config = control_config.get("state_file", "controller_state.json")
     STATE_FILE_PATH = Path(state_file_config)
@@ -215,16 +218,18 @@ def main():
         log(f"LOCAL MQTT disconnected rc={rc}")
 
     def on_message(mqtt_client, userdata, msg):
-        global latest_payload, latest_mw0, latest_payload_changed_at
+        global latest_payload, latest_mw0, latest_mw21, latest_mw22, latest_payload_changed_at
         payload_text = msg.payload.decode("utf-8", errors="replace")
-        _, mw0 = parse_input_payload(payload_text)
+        _, mw0, mw21, mw22 = parse_input_payload(payload_text)
         previous_payload = latest_payload
         with state_lock:
             latest_payload = payload_text
             latest_mw0 = mw0
+            latest_mw21 = mw21
+            latest_mw22 = mw22
             latest_payload_changed_at = time.time()
         if payload_text != previous_payload:
-            log(f"LOCAL input received MW0={mw0}")
+            log(f"LOCAL input MW0={mw0} MW21={mw21} MW22={mw22}")
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
@@ -272,7 +277,7 @@ def main():
             continue
 
         if mw0 is None:
-            _, parsed_mw0 = parse_input_payload(payload_text)
+            _, parsed_mw0, _, _ = parse_input_payload(payload_text)
             mw0 = parsed_mw0
         bridge_seq += 1
 
@@ -293,7 +298,9 @@ def main():
             else:
                 continue
 
-        command_payload = build_command_payload(mw20_value, "bistu11")
+        command_payload = build_command_payload(
+            device_sn, mw20=mw20_value, mw21=1, mw22=0
+        )
 
         if (
             control_config.get("dedup_command", True)
