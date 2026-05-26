@@ -225,11 +225,13 @@ def main():
         global latest_payload, latest_mw0, latest_payload_changed_at
         payload_text = msg.payload.decode("utf-8", errors="replace")
         _, mw0 = parse_input_payload(payload_text)
+        previous_payload = latest_payload
         with state_lock:
             latest_payload = payload_text
             latest_mw0 = mw0
             latest_payload_changed_at = time.time()
-        log(f"LOCAL input received MW0={mw0} payload={payload_text}")
+        if payload_text != previous_payload:
+            log(f"LOCAL input received MW0={mw0}")
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
