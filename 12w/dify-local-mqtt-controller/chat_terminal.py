@@ -351,7 +351,7 @@ def main():
 
             try:
                 outputs = call_deepseek_chat(
-                    config, mw0, user_input, mw20 or 0, current_mode
+                    config, mw0, user_input, mw20 or 0, mw21 or 0, mw22 or 0, current_mode
                 )
             except Exception as exc:
                 print(f"  [Error] DeepSeek API call failed: {exc}")
