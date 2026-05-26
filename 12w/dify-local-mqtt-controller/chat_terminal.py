@@ -334,10 +334,62 @@ def main():
             if not user_input:
                 continue
 
-            if user_input.lower() in ("exit", "quit", "退出"):
+            # === 本地硬命令（不经过DeepSeek，100%可靠）===
+            local_handled = True
+            q = user_input.strip().lower()
+
+            if q in ("exit", "quit", "退出"):
                 break
-            if user_input.lower() in ("help", "帮助", "?"):
+            if q in ("help", "帮助", "?"):
                 print_banner(config)
+                continue
+
+            # 模式切换
+            if q in ("自动模式", "自动", "auto"):
+                if current_mode != "auto":
+                    save_mode_state(state_file, "auto", reason="local_cmd")
+                    current_mode = "auto"
+                    if local_connected:
+                        publish_command(client, mqtt_config, device_sn, 0, mw21=1, mw22=0)
+                    print("\n  [AI] 已切换到自动模式。MW21=1, MW22=0")
+                    print(f"  [Action] Published MW21=1,MW22=0 to PLC")
+                else:
+                    print("\n  [AI] 当前已经是自动模式。")
+            elif q in ("手动模式", "手动", "manual", "自定义模式", "自定义"):
+                if current_mode != "manual":
+                    save_mode_state(state_file, "manual", reason="local_cmd")
+                    current_mode = "manual"
+                    if local_connected:
+                        publish_command(client, mqtt_config, device_sn, 0, mw21=0, mw22=1)
+                    print("\n  [AI] 已切换到手动模式。MW21=0, MW22=1（已关闭PLC自动）")
+                    print(f"  [Action] Published MW21=0,MW22=1 to PLC")
+                else:
+                    print("\n  [AI] 当前已经是手动模式。")
+
+            # 手动控制（仅手动模式）
+            elif q in ("开", "打开", "启动", "开启", "开灯"):
+                if current_mode != "manual":
+                    print("\n  [AI] 请先切换到手动模式再操作。")
+                elif local_connected:
+                    publish_command(client, mqtt_config, device_sn, 1, mw21=0, mw22=1)
+                    print("\n  [AI] 已开灯。MW20=1, MW21=0, MW22=1")
+                    print(f"  [Action] Published MW20=1,MW21=0,MW22=1 to PLC")
+                else:
+                    print("\n  [Error] MQTT disconnected")
+            elif q in ("关", "关闭", "停止", "关灯"):
+                if current_mode != "manual":
+                    print("\n  [AI] 请先切换到手动模式再操作。")
+                elif local_connected:
+                    publish_command(client, mqtt_config, device_sn, 0, mw21=0, mw22=1)
+                    print("\n  [AI] 已关灯。MW20=0, MW21=0, MW22=1")
+                    print(f"  [Action] Published MW20=0,MW21=0,MW22=1 to PLC")
+                else:
+                    print("\n  [Error] MQTT disconnected")
+
+            else:
+                local_handled = False
+
+            if local_handled:
                 continue
 
             if mw0 is None:
