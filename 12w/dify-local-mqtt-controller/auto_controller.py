@@ -257,16 +257,19 @@ def main():
         with state_lock:
             payload_text = latest_payload
             mw0 = latest_mw0
+            mw21 = latest_mw21
+            mw22 = latest_mw22
 
         if not payload_text:
             continue
 
         mode_state = load_mode_state(STATE_FILE_PATH)
-        if mode_state == "manual":
+        # 双重检查：controller_state.json OR PLC 寄存器 MW22=1（手动激活）
+        plc_manual = (mw22 == 1 and mw21 == 0)
+        if mode_state == "manual" or plc_manual:
             if payload_text != last_processed_payload:
-                log(
-                    f"Manual mode active (by chat terminal), auto workflow suspended. MW0={mw0}"
-                )
+                reason = "controller_state" if mode_state == "manual" else f"PLC registers MW21={mw21},MW22={mw22}"
+                log(f"Manual mode active ({reason}), auto workflow suspended. MW0={mw0}")
             last_processed_payload = payload_text
             continue
 
