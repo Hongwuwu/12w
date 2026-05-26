@@ -7,7 +7,7 @@ Dify 本地 MQTT 自动控制器（Mode 感知版 + MW21/MW22）
 2. 订阅 PLC 上报 topic，解析 MW0/MW21/MW22。
 3. 调用 Dify Workflow API（工作流A），把 MW0 传给 Dify 做判断。
 4. 读取 Dify 返回的 mw20，发布控制命令到 MQTT。
-5. 自动模式：写入 MW20（散热）+ MW21=1（自动标志）+ MW22=0。
+5. 自动模式：写入 MW20（灯光/供电）+ MW21=1（自动标志）+ MW22=0。
 6. 通过 controller_state.json 感知全局模式，manual 模式下自动休眠。
 
 注意：

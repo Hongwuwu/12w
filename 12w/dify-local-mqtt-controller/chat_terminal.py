@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Dify PLC AI Chat Terminal（MW21/MW22 版）
+Dify PLC AI Chat Terminal（灯光 + DJ 版）
 
 作用：
 1. 连接本地 MQTT Broker，实时缓存 PLC 数据（MW0、MW20、MW21、MW22）。
 2. 提供交互式命令行，用户输入自然语言查询或控制指令。
-3. 调用 Dify 工作流 B（deepseek），获取 AI 回答 + 结构化指令（mode/mw20/mw21/mw22）。
-4. 切换全局运行模式（auto / manual），通过 controller_state.json + MQTT 寄存器与原控制器共享。
-5. manual 模式：写入 MW22=1,MW21=0；auto 模式：写入 MW21=1,MW22=0；MW20 控制散热。
+3. 调用 Dify 工作流 B（deepseek），获取 AI 回答 + 结构化指令。
+4. 切换全局运行模式（auto / manual）+ 灯光控制 + DJ 闪烁模式。
+5. manual 模式：MW22=1,MW21=0；auto 模式：MW21=1,MW22=0；MW20 控制灯光/DJ。
 
 注意：
 - 本程序需要 Python 3 和 paho-mqtt。
 - 运行前必须填写 config.json 中的 dify_chat.api_key。
+- MW20 是通用供电信号，语义由 Dify prompt 决定（灯光/散热/DJ）。
 - 保持窗口打开，按 Ctrl+C 退出。
 """
 
@@ -41,7 +42,7 @@ from common import (
 
 CONFIG_PATH = Path(os.getenv("CHAT_CONFIG", "config.json"))
 
-VERSION = "chat-terminal-20260518"
+VERSION = "chat-terminal-20260526-lights-dj"
 
 running = True
 local_connected = False
@@ -53,6 +54,11 @@ latest_mw21 = None
 latest_mw22 = None
 latest_payload_at = 0.0
 current_mode = "auto"
+
+# DJ 闪烁模式状态
+dj_active = False
+dj_interval = 0.5
+dj_lock = threading.Lock()
 
 DEFAULT_CONFIG = {
     "local_mqtt": {
@@ -170,21 +176,49 @@ def print_banner(config):
     print('    "查询温度"     - Ask about current temperature')
     print('    "自动模式"     - Switch to auto control mode')
     print('    "自定义模式"   - Switch to manual control mode')
-    print('    "开" / "关"    - Control PLC (manual mode only)')
+    print('    "开灯"/"关灯"  - Light on/off (manual mode)')
+    print('    "开启DJ模式"   - Start DJ flashing mode')
+    print('    "关闭DJ模式"   - Stop DJ flashing mode')
     print("    Ctrl+C        - Exit")
     print("=" * 50)
 
 
-def print_status(mw0, mw20, mw21, mw22, mode):
+def print_status(mw0, mw20, mw21, mw22, mode, dj=False):
     temp = mw0 / 100.0 if mw0 is not None else None
+    dj_tag = " [DJ FLASH]" if dj else ""
     print(
-        f"\n  [Status] Temp: {temp} C (MW0={mw0}) | Cooling: MW20={mw20} | Auto: MW21={mw21} | Manual: MW22={mw22} | Mode: {mode}"
+        f"\n  [Status] Temp: {temp} C (MW0={mw0}) | Light: MW20={mw20} | Auto: MW21={mw21} | Manual: MW22={mw22} | Mode: {mode}{dj_tag}"
     )
 
 
 def main():
     global running, local_connected, latest_payload, latest_mw0, latest_mw20, latest_mw21, latest_mw22
-    global latest_payload_at, current_mode
+    global latest_payload_at, current_mode, dj_active, dj_interval
+
+    def _stop_dj():
+        """停止 DJ 闪烁模式并关灯。"""
+        global dj_active
+        with dj_lock:
+            if not dj_active:
+                return
+            dj_active = False
+        publish_command(client, mqtt_config, device_sn, 0, mw21=0, mw22=1)
+        log("DJ mode stopped, light turned off")
+
+    def _dj_toggle_loop():
+        """DJ 闪烁线程：定时翻转 MW20。"""
+        global dj_active
+        log(f"DJ mode started, interval={dj_interval}s")
+        while True:
+            with dj_lock:
+                if not dj_active:
+                    break
+            with state_lock:
+                current = latest_mw20 or 0
+            new_val = 0 if current == 1 else 1
+            publish_command(client, mqtt_config, device_sn, new_val, mw21=0, mw22=1)
+            time.sleep(dj_interval)
+        log("DJ toggle loop exited")
 
     signal.signal(signal.SIGINT, stop_handler)
     signal.signal(signal.SIGTERM, stop_handler)
@@ -285,7 +319,7 @@ def main():
 
             current_mode = load_mode_state(state_file)
 
-            print_status(mw0, mw20, mw21, mw22, current_mode)
+            print_status(mw0, mw20, mw21, mw22, current_mode, dj=dj_active)
             try:
                 user_input = input("\n> ").strip()
             except EOFError:
@@ -322,16 +356,42 @@ def main():
             mw20_cmd = outputs.get("mw20")
             mw21_cmd = outputs.get("mw21")
             mw22_cmd = outputs.get("mw22")
+            dj_cmd = outputs.get("dj_mode")
 
             print(f"\n  [AI] {text}")
 
+            # === DJ 模式处理（优先级最高） ===
+            if dj_cmd is not None:
+                dj_str = str(dj_cmd).strip().lower()
+                if dj_str in ("on", "true", "1", "start", "开启"):
+                    if not dj_active and local_connected:
+                        # 读取 Dify 返回的闪烁间隔（如果有）
+                        dj_interval_raw = outputs.get("dj_interval")
+                        if dj_interval_raw is not None:
+                            try:
+                                dj_interval = float(dj_interval_raw)
+                            except (ValueError, TypeError):
+                                pass
+                        with dj_lock:
+                            dj_active = True
+                        threading.Thread(target=_dj_toggle_loop, daemon=True).start()
+                        print(f"  [DJ] Started flashing mode (interval={dj_interval}s)")
+                    else:
+                        print(f"  [DJ] Already active or MQTT disconnected")
+                elif dj_str in ("off", "false", "0", "stop", "关闭"):
+                    _stop_dj()
+                    print(f"  [DJ] Stopped flashing mode")
+
+            # === 模式切换 ===
             if mode_cmd in ("auto", "manual") and mode_cmd != current_mode:
+                # 切模式前先停 DJ
+                if dj_active:
+                    _stop_dj()
                 if save_mode_state(
                     state_file, mode_cmd, reason=f"user_chat_seq_{seq}"
                 ):
                     current_mode = mode_cmd
                     print(f"  [Mode] Switched to {mode_cmd}")
-                    # 发布模式寄存器到 MQTT，让 PLC 内部程序感知模式变化
                     if local_connected:
                         if mode_cmd == "auto":
                             publish_command(
@@ -346,7 +406,8 @@ def main():
                 else:
                     print(f"  [Error] Failed to save mode state")
 
-            if mw20_cmd is not None:
+            # === MW20 灯光控制（DJ 模式下忽略静态 mw20 指令） ===
+            if mw20_cmd is not None and not dj_active:
                 try:
                     mw20_value = int(mw20_cmd)
                     if mw20_value not in (0, 1):
@@ -362,7 +423,6 @@ def main():
                         else:
                             print(f"  [Error] MQTT disconnected, cannot send command")
                     else:
-                        # auto 模式下也允许聊天终端发命令（MW21=1,MW22=0）
                         if local_connected:
                             if publish_command(
                                 client, mqtt_config, device_sn, mw20_value, mw21=1, mw22=0
@@ -374,6 +434,8 @@ def main():
                             print(f"  [Error] MQTT disconnected, cannot send command")
                 except (ValueError, TypeError):
                     print(f"  [Warning] Invalid mw20 value: {mw20_cmd}")
+            elif mw20_cmd is not None and dj_active:
+                print(f"  [DJ] Ignored static mw20={mw20_cmd} — DJ mode is active")
 
             # 处理 Dify 直接返回的 mw21/mw22 指令（不通过模式切换）
             if mw20_cmd is None and (mw21_cmd is not None or mw22_cmd is not None):
@@ -390,6 +452,8 @@ def main():
         except Exception as exc:
             log(f"Error in main loop: {exc}")
 
+    if dj_active:
+        _stop_dj()
     client.loop_stop()
     client.disconnect()
     log("Chat terminal exited")

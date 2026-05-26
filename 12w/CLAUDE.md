@@ -11,7 +11,7 @@ Dify Local MQTT Controller — an industrial IoT bridge between PLC devices, a l
 | Register | Purpose | Values |
 |---|---|---|
 | MW0 | Temperature sensor (input) | temp × 100 (e.g. 3500 = 35.00°C) |
-| MW20 | Cooling/heat dissipation control | 0 = off, 1 = on |
+| MW20 | Light/power control | 0 = off, 1 = on |
 | MW21 | Auto mode flag | 1 = auto mode active |
 | MW22 | Manual mode flag | 1 = manual mode active |
 
@@ -74,3 +74,54 @@ On first run, if `config.json` doesn't exist, a default is generated and the pro
 - The Dify workflows should have their built-in MQTT Trigger and MQTT Publisher nodes **disabled** — this controller handles all MQTT I/O directly.
 - The `controller_state.json` file coordinates Python-side mode. The MW21/MW22 registers coordinate PLC-side mode. Both must be kept in sync.
 - The project is Windows-first (the launcher is `run.bat`), but the Python source is cross-platform.
+
+## DJ Mode (exp/lights-dj branch)
+
+When the chat terminal receives `dj_mode: "on"` from Dify, it starts a background daemon thread that toggles MW20 between 0 and 1 every `dj_interval` seconds (default 0.5s). The DJ thread stops when:
+- Dify returns `dj_mode: "off"` / `"stop"`
+- Mode is switched (auto↔manual)
+- User exits (Ctrl+C)
+- User sends "关灯" / "关闭DJ模式"
+
+While DJ mode is active, static `mw20` commands from Dify are ignored (the DJ toggle thread owns MW20).
+
+DJ-relevant Dify outputs:
+- `dj_mode`: `"on"` / `"off"` / `"start"` / `"stop"` / `true` / `false`
+- `dj_interval`: float (seconds, optional, defaults to 0.5)
+
+## Dify Workflow B Prompt (Chat/Light)
+
+The Dify workflow (deepseek LLM) needs its prompt updated to handle light + DJ commands. Key output variables:
+
+| Variable | Type | Description |
+|---|---|---|
+| `text` | string | AI natural language response |
+| `mode` | string | `"auto"` or `"manual"` to switch mode |
+| `mw20` | number | 0 = off, 1 = on (light/power control) |
+| `mw21` | number | Auto mode flag (1=auto) |
+| `mw22` | number | Manual mode flag (1=manual) |
+| `dj_mode` | string | `"on"` / `"off"` to control DJ flashing |
+| `dj_interval` | number | DJ flash interval in seconds (optional) |
+
+Example prompt additions for the Dify workflow:
+
+```
+你是PLC灯光控制助手。MW20控制灯光的供电(0=关,1=开)。
+
+灯光指令：
+- 用户说"开灯"/"打开灯"/"亮灯" → mw20=1
+- 用户说"关灯"/"关闭灯"/"灭灯" → mw20=0
+
+DJ模式：
+- 用户说"开启DJ模式"/"DJ"/"蹦迪" → dj_mode="on", dj_interval=0.5
+- 用户说"关闭DJ模式"/"停止DJ" → dj_mode="off"
+- 用户说"快一点"/"加快" → dj_interval减半
+- 用户说"慢一点"/"减慢" → dj_interval加倍
+
+模式切换：
+- 用户说"自动模式"/"自动" → mode="auto"
+- 用户说"自定义模式"/"手动模式"/"手动" → mode="manual"
+
+注意：MW20是通用供电信号，1=通电(灯亮)，0=断电(灯灭)。
+DJ模式下mw20由终端程序自动翻转，你不需要返回mw20值。
+```
