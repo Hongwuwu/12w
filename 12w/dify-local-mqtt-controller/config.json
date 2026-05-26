@@ -1,0 +1,31 @@
+{
+    "local_mqtt": {
+        "host": "192.168.31.197",
+        "port": 1883,
+        "username": "admin",
+        "password": "mmadmin@12345",
+        "input_topic": "bistu11/TagValues",
+        "command_topic": "bistu11/MQTTSetValueCommand",
+        "mqtt_version": "3.1.1"
+    },
+    "dify": {
+        "api_url": "http://192.168.31.197/v1/workflows/run",
+        "api_key": "PASTE_DIFY_AUTO_API_KEY_HERE",
+        "user": "mqtt-local-controller",
+        "timeout_sec": 30
+    },
+    "dify_chat": {
+        "api_url": "http://192.168.31.197/v1/workflows/run",
+        "api_key": "PASTE_DIFY_CHAT_API_KEY_HERE",
+        "user": "mqtt-chat-terminal",
+        "timeout_sec": 60
+    },
+    "control": {
+        "state_file": "controller_state.json",
+        "device_sn": "bistu11",
+        "process_interval_sec": 2.0,
+        "dedup_input": true,
+        "dedup_command": true,
+        "publish_on_no_action": false
+    }
+}
