@@ -264,8 +264,9 @@ def main():
             continue
 
         mode_state = load_mode_state(STATE_FILE_PATH)
-        # 双重检查：controller_state.json OR PLC 寄存器 MW22=1（手动激活）
-        plc_manual = (mw22 == 1 and mw21 == 0)
+        # 双重检查：controller_state.json OR PLC 寄存器 MW22=1（手动请求）
+        # 只要 MW22=1 就休眠，不管 MW21 是多少（防止竞态条件）
+        plc_manual = (mw22 == 1)
         if mode_state == "manual" or plc_manual:
             if payload_text != last_processed_payload:
                 reason = "controller_state" if mode_state == "manual" else f"PLC registers MW21={mw21},MW22={mw22}"
@@ -310,6 +311,12 @@ def main():
             and command_payload == last_command_payload
         ):
             log(f"Duplicate command skipped payload={command_payload}")
+            continue
+
+        # 发命令前二次检查模式（防止Dify调用期间被切到手动模式）
+        mode_state_recheck = load_mode_state(STATE_FILE_PATH)
+        if mode_state_recheck == "manual":
+            log("Mode switched to manual during Dify call, command dropped")
             continue
 
         if not local_connected:
