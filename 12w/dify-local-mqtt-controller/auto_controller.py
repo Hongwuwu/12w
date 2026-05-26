@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Dify 本地 MQTT 自动控制器（Mode 感知版 + MW21/MW22）
+Dify 本地 MQTT 自动控制器（Mode 感知版）
 
 作用：
 1. 连接客户现场的内网 MQTT Broker。
-2. 订阅 PLC 上报 topic，解析 MW0/MW21/MW22。
+2. 订阅 PLC 上报 topic，解析 MW0。
 3. 调用 Dify Workflow API（工作流A），把 MW0 传给 Dify 做判断。
-4. 读取 Dify 返回的 mw20，发布控制命令到 MQTT。
-5. 自动模式：写入 MW20（散热）+ MW21=1（自动标志）+ MW22=0。
-6. 通过 controller_state.json 感知全局模式，manual 模式下自动休眠。
+4. 读取 Dify 返回的 mw20/action，发布控制命令到 MQTT。
+5. 通过 controller_state.json 感知全局模式，manual 模式下自动休眠。
 
 注意：
 - 这个文件是源码版，方便阅读和二次开发。
@@ -51,8 +50,6 @@ local_connected = False
 state_lock = threading.Lock()
 latest_payload = None
 latest_mw0 = None
-latest_mw21 = None
-latest_mw22 = None
 latest_payload_changed_at = 0.0
 last_processed_payload = None
 last_command_payload = None
@@ -143,21 +140,17 @@ def call_dify(config, payload_text, payload_json, mw0, seq):
 
 
 def normalize_command(outputs):
-    """解析 Dify 输出，返回 (mw20, reason)。mw20 为 None 表示无动作。"""
     if not isinstance(outputs, dict):
         return None, "outputs is not an object"
 
     command_payload = outputs.get("command_payload") or outputs.get("mqtt_payload")
     if command_payload:
         if isinstance(command_payload, str):
-            try:
-                parsed = json.loads(command_payload)
-                tag = parsed[0]["TagData"][0]
-                return tag.get("MW20"), "command_payload"
-            except Exception:
-                return None, "invalid command_payload"
-        tag = command_payload[0].get("TagData", [{}])[0]
-        return tag.get("MW20"), "command_payload"
+            return command_payload, "command_payload"
+        return (
+            json.dumps(command_payload, ensure_ascii=False, separators=(",", ":")),
+            "command_payload",
+        )
 
     mw20 = outputs.get("mw20")
     if mw20 is None:
@@ -169,15 +162,15 @@ def normalize_command(outputs):
             return None, f"invalid mw20={mw20!r}"
         if value not in (0, 1):
             return None, f"mw20 must be 0 or 1, got {value}"
-        return value, "mw20"
+        return build_command_payload(value, "bistu11"), "mw20"
 
     action = outputs.get("action") or outputs.get("result")
     if isinstance(action, str):
         action_lower = action.strip().lower()
         if "open" in action_lower or action_lower in ("1", "on", "true"):
-            return 1, f"action={action}"
+            return build_command_payload(1, "bistu11"), f"action={action}"
         if "close" in action_lower or action_lower in ("0", "off", "false"):
-            return 0, f"action={action}"
+            return build_command_payload(0, "bistu11"), f"action={action}"
         if action_lower in ("none", "no_action", "noop", ""):
             return None, f"no action={action}"
 
@@ -185,7 +178,7 @@ def normalize_command(outputs):
 
 
 def main():
-    global running, local_connected, latest_payload, latest_mw0, latest_mw21, latest_mw22
+    global running, local_connected, latest_payload, latest_mw0
     global latest_payload_changed_at, last_processed_payload, last_command_payload
     global bridge_seq, STATE_FILE_PATH
 
@@ -198,7 +191,6 @@ def main():
     config = load_config(CONFIG_PATH, DEFAULT_CONFIG)
     mqtt_config = config["local_mqtt"]
     control_config = config["control"]
-    device_sn = control_config.get("device_sn", "bistu11")
 
     state_file_config = control_config.get("state_file", "controller_state.json")
     STATE_FILE_PATH = Path(state_file_config)
@@ -230,16 +222,14 @@ def main():
         log(f"LOCAL MQTT disconnected rc={rc}")
 
     def on_message(mqtt_client, userdata, msg):
-        global latest_payload, latest_mw0, latest_mw21, latest_mw22, latest_payload_changed_at
+        global latest_payload, latest_mw0, latest_payload_changed_at
         payload_text = msg.payload.decode("utf-8", errors="replace")
-        _, mw0, mw21, mw22 = parse_input_payload(payload_text)
+        _, mw0 = parse_input_payload(payload_text)
         with state_lock:
             latest_payload = payload_text
             latest_mw0 = mw0
-            latest_mw21 = mw21
-            latest_mw22 = mw22
             latest_payload_changed_at = time.time()
-        log(f"LOCAL input received MW0={mw0} MW21={mw21} MW22={mw22}")
+        log(f"LOCAL input received MW0={mw0} payload={payload_text}")
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
@@ -289,7 +279,7 @@ def main():
         ):
             continue
 
-        payload_json, parsed_mw0, _, _ = parse_input_payload(payload_text)
+        payload_json, parsed_mw0 = parse_input_payload(payload_text)
         if mw0 is None:
             mw0 = parsed_mw0
         bridge_seq += 1
@@ -299,9 +289,9 @@ def main():
             outputs, raw_result = call_dify(
                 config, payload_text, payload_json, mw0, bridge_seq
             )
-            mw20_value, reason = normalize_command(outputs)
+            command_payload, reason = normalize_command(outputs)
             log(
-                f"Dify outputs seq={bridge_seq} reason={reason} mw20={mw20_value} outputs={json.dumps(outputs, ensure_ascii=False)}"
+                f"Dify outputs seq={bridge_seq} reason={reason} outputs={json.dumps(outputs, ensure_ascii=False)}"
             )
         except Exception as exc:
             log(f"Dify call failed seq={bridge_seq}: {exc}")
@@ -310,15 +300,11 @@ def main():
 
         last_processed_payload = payload_text
 
-        if mw20_value is None:
+        if not command_payload:
             if control_config.get("publish_on_no_action", False):
-                mw20_value = 0
+                command_payload = build_command_payload(0, "bistu11")
             else:
                 continue
-
-        command_payload = build_command_payload(
-            device_sn, mw20=mw20_value, mw21=1, mw22=0
-        )
 
         if (
             control_config.get("dedup_command", True)

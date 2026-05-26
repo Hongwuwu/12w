@@ -63,60 +63,45 @@ def load_config(config_path, default_config):
 
 def parse_input_payload(payload_text):
     """
-    解析 PLC 上报 payload，提取 MW0 / MW21 / MW22。
+    解析 PLC 上报 payload，提取 MW0。
 
-    期望格式：[{"DeviceSN":"bistu01","TagData":[{"Time":"...","MW0":3500,"MW21":1,"MW22":0}]}]
+    期望格式：[{"DeviceSN":"bistu01","TagData":[{"Time":"...","MW0":3500}]}]
 
-    返回 (parsed_data, mw0, mw21, mw22) 元组。
+    返回 (parsed_data, mw0) 元组。
     """
     try:
         data = json.loads(payload_text)
         if not isinstance(data, list) or not data:
-            return None, None, None, None
+            return None, None
         tag_data = data[0].get("TagData") or []
         if not tag_data or not isinstance(tag_data[0], dict):
-            return None, None, None, None
-        tag = tag_data[0]
-        return data, tag.get("MW0"), tag.get("MW21"), tag.get("MW22")
+            return None, None
+        return data, tag_data[0].get("MW0")
     except Exception:
-        return None, None, None, None
+        return None, None
 
 
 def parse_command_payload(payload_text):
     """
-    解析控制器发出的命令 payload，提取 MW20 / MW21 / MW22。
+    解析控制器发出的命令 payload，提取 MW20。
 
-    期望格式：[{"DeviceSN":"bistu01","TagData":[{"MW20":1,"MW21":1,"MW22":0}]}]
-
-    返回 (mw20, mw21, mw22) 元组。
+    期望格式：[{"DeviceSN":"bistu01","TagData":[{"MW20":1}]}]
     """
     try:
         data = json.loads(payload_text)
         if not isinstance(data, list) or not data:
-            return None, None, None
+            return None
         tag_data = data[0].get("TagData") or []
         if not tag_data or not isinstance(tag_data[0], dict):
-            return None, None, None
-        tag = tag_data[0]
-        return tag.get("MW20"), tag.get("MW21"), tag.get("MW22")
+            return None
+        return tag_data[0].get("MW20")
     except Exception:
-        return None, None, None
+        return None
 
 
-def build_command_payload(device_sn, mw20=None, mw21=None, mw22=None):
-    """根据 MW20/MW21/MW22 值生成 PLC 控制命令 MQTT payload。
-
-    只包含非 None 的寄存器，允许部分写入。
-    规则：自动模式 MW21=1,MW22=0；手动模式 MW22=1,MW21=0；MW20 控制散热。
-    """
-    tag = {}
-    if mw20 is not None:
-        tag["MW20"] = int(mw20)
-    if mw21 is not None:
-        tag["MW21"] = int(mw21)
-    if mw22 is not None:
-        tag["MW22"] = int(mw22)
-    payload = [{"DeviceSN": device_sn, "TagData": [tag]}]
+def build_command_payload(value, device_sn):
+    """根据 MW20 值生成 PLC 控制命令 MQTT payload。"""
+    payload = [{"DeviceSN": device_sn, "TagData": [{"MW20": int(value)}]}]
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 

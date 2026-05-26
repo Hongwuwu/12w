@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Dify PLC AI Chat Terminal（MW21/MW22 版）
+Dify PLC AI Chat Terminal
 
 作用：
-1. 连接本地 MQTT Broker，实时缓存 PLC 数据（MW0、MW20、MW21、MW22）。
+1. 连接本地 MQTT Broker，实时缓存 PLC 数据（MW0、MW20）。
 2. 提供交互式命令行，用户输入自然语言查询或控制指令。
-3. 调用 Dify 工作流 B（deepseek），获取 AI 回答 + 结构化指令（mode/mw20/mw21/mw22）。
-4. 切换全局运行模式（auto / manual），通过 controller_state.json + MQTT 寄存器与原控制器共享。
-5. manual 模式：写入 MW22=1,MW21=0；auto 模式：写入 MW21=1,MW22=0；MW20 控制散热。
+3. 调用 Dify 工作流 B（deepseek），获取 AI 回答 + 结构化指令（mode/mw20）。
+4. 切换全局运行模式（auto / manual），通过 controller_state.json 与原控制器共享。
+5. 在 manual 模式下，根据 Dify 返回的 mw20 直接发 MQTT 命令到 PLC。
 
 注意：
 - 本程序需要 Python 3 和 paho-mqtt。
@@ -49,8 +49,6 @@ state_lock = threading.Lock()
 latest_payload = None
 latest_mw0 = None
 latest_mw20 = None
-latest_mw21 = None
-latest_mw22 = None
 latest_payload_at = 0.0
 current_mode = "auto"
 
@@ -84,7 +82,7 @@ def stop_handler(signum, frame):
     log("Stop signal received, exiting...")
 
 
-def call_dify_chat(config, mw0, user_query, current_mw20, current_mw21, current_mw22, current_mode):
+def call_dify_chat(config, mw0, user_query, current_mw20, current_mode):
     dify_config = config["dify_chat"]
     api_key = dify_config.get("api_key", "")
     if not api_key or api_key == "PASTE_DIFY_CHAT_API_KEY_HERE":
@@ -95,8 +93,6 @@ def call_dify_chat(config, mw0, user_query, current_mw20, current_mw21, current_
             "mw0": mw0,
             "user_query": user_query,
             "current_mw20": current_mw20,
-            "current_mw21": current_mw21,
-            "current_mw22": current_mw22,
             "current_mode": current_mode,
         },
         "response_mode": "blocking",
@@ -134,11 +130,8 @@ def call_dify_chat(config, mw0, user_query, current_mw20, current_mw21, current_
     return outputs, result
 
 
-def publish_command(client, mqtt_config, device_sn, mw20_value, mw21=None, mw22=None):
-    """发布控制命令到 MQTT，可同时写入 MW20/MW21/MW22。"""
-    command_payload = build_command_payload(
-        device_sn, mw20=mw20_value, mw21=mw21, mw22=mw22
-    )
+def publish_command(client, mqtt_config, device_sn, mw20_value):
+    command_payload = build_command_payload(mw20_value, device_sn)
     try:
         info = client.publish(
             mqtt_config["command_topic"], command_payload, qos=0, retain=False
@@ -146,7 +139,7 @@ def publish_command(client, mqtt_config, device_sn, mw20_value, mw21=None, mw22=
         info.wait_for_publish(timeout=5)
         if info.is_published():
             log(
-                f"Published command MW20={mw20_value} MW21={mw21} MW22={mw22} topic={mqtt_config['command_topic']}"
+                f"Published command MW20={mw20_value} topic={mqtt_config['command_topic']}"
             )
             return True
         else:
@@ -175,15 +168,15 @@ def print_banner(config):
     print("=" * 50)
 
 
-def print_status(mw0, mw20, mw21, mw22, mode):
+def print_status(mw0, mw20, mode):
     temp = mw0 / 100.0 if mw0 is not None else None
     print(
-        f"\n  [Status] Temp: {temp} C (MW0={mw0}) | Cooling: MW20={mw20} | Auto: MW21={mw21} | Manual: MW22={mw22} | Mode: {mode}"
+        f"\n  [Status] Temperature: {temp} C (MW0={mw0}) | Control: MW20={mw20} | Mode: {mode}"
     )
 
 
 def main():
-    global running, local_connected, latest_payload, latest_mw0, latest_mw20, latest_mw21, latest_mw22
+    global running, local_connected, latest_payload, latest_mw0, latest_mw20
     global latest_payload_at, current_mode
 
     signal.signal(signal.SIGINT, stop_handler)
@@ -224,28 +217,20 @@ def main():
         log(f"LOCAL MQTT disconnected rc={rc}")
 
     def on_message(mqtt_client, userdata, msg):
-        global latest_payload, latest_mw0, latest_mw20, latest_mw21, latest_mw22, latest_payload_at
+        global latest_payload, latest_mw0, latest_mw20, latest_payload_at
         payload_text = msg.payload.decode("utf-8", errors="replace")
         topic = msg.topic
 
         with state_lock:
             if topic == mqtt_config["input_topic"]:
-                _, mw0, mw21, mw22 = parse_input_payload(payload_text)
+                _, mw0 = parse_input_payload(payload_text)
                 latest_payload = payload_text
                 latest_mw0 = mw0
-                if mw21 is not None:
-                    latest_mw21 = mw21
-                if mw22 is not None:
-                    latest_mw22 = mw22
                 latest_payload_at = time.time()
             elif topic == mqtt_config["command_topic"]:
-                mw20, mw21, mw22 = parse_command_payload(payload_text)
+                mw20 = parse_command_payload(payload_text)
                 if mw20 is not None:
                     latest_mw20 = mw20
-                if mw21 is not None:
-                    latest_mw21 = mw21
-                if mw22 is not None:
-                    latest_mw22 = mw22
 
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
@@ -280,12 +265,10 @@ def main():
             with state_lock:
                 mw0 = latest_mw0
                 mw20 = latest_mw20
-                mw21 = latest_mw21
-                mw22 = latest_mw22
 
             current_mode = load_mode_state(state_file)
 
-            print_status(mw0, mw20, mw21, mw22, current_mode)
+            print_status(mw0, mw20, current_mode)
             try:
                 user_input = input("\n> ").strip()
             except EOFError:
@@ -311,7 +294,7 @@ def main():
 
             try:
                 outputs, raw_result = call_dify_chat(
-                    config, mw0, user_input, mw20 or 0, mw21 or 0, mw22 or 0, current_mode
+                    config, mw0, user_input, mw20 or 0, current_mode
                 )
             except Exception as exc:
                 print(f"  [Error] Dify API call failed: {exc}")
@@ -320,8 +303,6 @@ def main():
             text = outputs.get("test") or outputs.get("text") or "(no response)"
             mode_cmd = outputs.get("mode")
             mw20_cmd = outputs.get("mw20")
-            mw21_cmd = outputs.get("mw21")
-            mw22_cmd = outputs.get("mw22")
 
             print(f"\n  [AI] {text}")
 
@@ -331,59 +312,36 @@ def main():
                 ):
                     current_mode = mode_cmd
                     print(f"  [Mode] Switched to {mode_cmd}")
-                    # 发布模式寄存器到 MQTT，让 PLC 内部程序感知模式变化
-                    if local_connected:
-                        if mode_cmd == "auto":
-                            publish_command(
-                                client, mqtt_config, device_sn, 0, mw21=1, mw22=0
-                            )
-                            print(f"  [Action] Published MW21=1,MW22=0 (auto mode) to PLC")
-                        else:
-                            publish_command(
-                                client, mqtt_config, device_sn, 0, mw21=0, mw22=1
-                            )
-                            print(f"  [Action] Published MW22=1,MW21=0 (manual mode) to PLC")
                 else:
                     print(f"  [Error] Failed to save mode state")
 
-            if mw20_cmd is not None:
+            if mw20_cmd is not None and current_mode == "manual":
                 try:
                     mw20_value = int(mw20_cmd)
-                    if mw20_value not in (0, 1):
-                        print(f"  [Warning] Invalid mw20={mw20_value}, must be 0 or 1")
-                    elif current_mode == "manual":
+                    if mw20_value in (0, 1):
                         if local_connected:
                             if publish_command(
-                                client, mqtt_config, device_sn, mw20_value, mw21=0, mw22=1
+                                client, mqtt_config, device_sn, mw20_value
                             ):
-                                print(f"  [Action] Sent MW20={mw20_value},MW22=1 (manual) to PLC")
+                                print(f"  [Action] Sent MW20={mw20_value} to PLC")
                             else:
-                                print(f"  [Error] Failed to send command")
+                                print(
+                                    f"  [Error] Failed to send MW20={mw20_value}"
+                                )
                         else:
-                            print(f"  [Error] MQTT disconnected, cannot send command")
+                            print(
+                                f"  [Error] MQTT disconnected, cannot send command"
+                            )
                     else:
-                        # auto 模式下也允许聊天终端发命令（MW21=1,MW22=0）
-                        if local_connected:
-                            if publish_command(
-                                client, mqtt_config, device_sn, mw20_value, mw21=1, mw22=0
-                            ):
-                                print(f"  [Action] Sent MW20={mw20_value},MW21=1 (auto) to PLC")
-                            else:
-                                print(f"  [Error] Failed to send command")
-                        else:
-                            print(f"  [Error] MQTT disconnected, cannot send command")
+                        print(
+                            f"  [Warning] Invalid mw20={mw20_value}, must be 0 or 1"
+                        )
                 except (ValueError, TypeError):
                     print(f"  [Warning] Invalid mw20 value: {mw20_cmd}")
-
-            # 处理 Dify 直接返回的 mw21/mw22 指令（不通过模式切换）
-            if mw20_cmd is None and (mw21_cmd is not None or mw22_cmd is not None):
-                if local_connected:
-                    m21 = int(mw21_cmd) if mw21_cmd is not None else None
-                    m22 = int(mw22_cmd) if mw22_cmd is not None else None
-                    publish_command(
-                        client, mqtt_config, device_sn, 0, mw21=m21, mw22=m22
-                    )
-                    print(f"  [Action] Published MW21={m21},MW22={m22} to PLC")
+            elif mw20_cmd is not None and current_mode == "auto":
+                print(
+                    f"  [Info] Ignored mw20={mw20_cmd} because current mode is auto"
+                )
 
         except KeyboardInterrupt:
             break
