@@ -13,24 +13,23 @@ Originally built on Dify workflows (see git history `00e9326`), now uses direct 
 ```bash
 # Install dependencies
 pip install paho-mqtt
-pip install PySide6==6.7.3    # required for GUI only
+pip install PySide6==6.7.3    # GUI 必需
 
-# Run both auto controller + chat terminal (default)
+# 默认：自动控制器（后台线程）+ GUI（前台窗口）—— 推荐
 python main.py
 
-# Run only the auto controller
+# 仅自动控制器
 python main.py auto
 
-# Run only the interactive chat terminal
+# 仅命令行终端
 python main.py chat
 
-# Run the PySide6 graphical interface
+# 仅 GUI
 python main.py gui
-# or directly: python chat_gui.py
 
-# Windows: double-click run.bat for a menu-driven launcher (4 options)
+# Windows: 双击 run.bat 菜单选择
 
-# Package into standalone exe (no Python required on target machine)
+# Package into standalone exe
 pyinstaller --onefile --name dify_local_controller auto_controller.py
 pyinstaller --onefile --name dify_chat_terminal chat_terminal.py
 pyinstaller --onefile --windowed --name dify_gui chat_gui.py

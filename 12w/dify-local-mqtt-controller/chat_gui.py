@@ -14,6 +14,7 @@ DeepSeek PLC AI Chat GUI — PySide6 图形化界面
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -346,7 +347,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 class SignalEmitter(QObject):
     connected = Signal()
     disconnected = Signal()
-    data_received = Signal(object, object, object, object)  # mw0, mw20, mw21, mw22
+    data_updated = Signal()  # MQTT 有数据到达，通知 GUI 刷新
 
 
 # ---------------------------------------------------------------------------
@@ -780,11 +781,12 @@ class MainWindow(QMainWindow):
         self.resize(1100, 680)
         self.setMinimumSize(900, 560)
 
-        # 内部状态
+        # 内部状态 — MW20/21/22 初始为 0（关/未激活），MW0 等 PLC 数据
         self._latest_mw0 = None
-        self._latest_mw20 = None
-        self._latest_mw21 = None
-        self._latest_mw22 = None
+        self._latest_mw20 = 0
+        self._latest_mw21 = 0
+        self._latest_mw22 = 0
+        self._data_lock = threading.Lock()
         self._mqtt_connected = False
         self._current_mode = "auto"
         self._pending_ai = False
@@ -806,7 +808,7 @@ class MainWindow(QMainWindow):
         # 连接信号
         self._emitter.connected.connect(self._on_mqtt_connected)
         self._emitter.disconnected.connect(self._on_mqtt_disconnected)
-        self._emitter.data_received.connect(self._on_data_received)
+        self._emitter.data_updated.connect(self._refresh_dashboard)
         self._dashboard.mode_switch_requested.connect(self._on_mode_switch)
         self._chat.send_message.connect(self._on_user_message)
 
@@ -884,16 +886,25 @@ class MainWindow(QMainWindow):
             payload_text = msg.payload.decode("utf-8", errors="replace")
             topic = msg.topic
 
-            if topic == input_topic:
-                _, mw0, mw21, mw22 = parse_input_payload(payload_text)
-                self._emitter.data_received.emit(
-                    mw0, self._latest_mw20, mw21, mw22
-                )
-            elif topic == cmd_topic:
-                mw20, mw21, mw22 = parse_command_payload(payload_text)
-                self._emitter.data_received.emit(
-                    self._latest_mw0, mw20, mw21, mw22
-                )
+            with self._data_lock:
+                if topic == input_topic:
+                    _, mw0, mw21, mw22 = parse_input_payload(payload_text)
+                    if mw0 is not None:
+                        self._latest_mw0 = mw0
+                    if mw21 is not None:
+                        self._latest_mw21 = mw21
+                    if mw22 is not None:
+                        self._latest_mw22 = mw22
+                elif topic == cmd_topic:
+                    mw20, mw21, mw22 = parse_command_payload(payload_text)
+                    if mw20 is not None:
+                        self._latest_mw20 = mw20
+                    if mw21 is not None:
+                        self._latest_mw21 = mw21
+                    if mw22 is not None:
+                        self._latest_mw22 = mw22
+
+            self._emitter.data_updated.emit()
 
         self._mqtt_client.on_connect = on_connect
         self._mqtt_client.on_disconnect = on_disconnect
@@ -931,26 +942,15 @@ class MainWindow(QMainWindow):
         self._dashboard.set_connection(False)
         self._chat.add_system("MQTT 连接断开")
 
-    @Slot(object, object, object, object)
-    def _on_data_received(self, mw0, mw20, mw21, mw22):
-        if mw0 is not None:
-            self._latest_mw0 = mw0
-        if mw20 is not None:
-            self._latest_mw20 = mw20
-        if mw21 is not None:
-            self._latest_mw21 = mw21
-        if mw22 is not None:
-            self._latest_mw22 = mw22
-
-    # ---- 定时刷新仪表盘 ----
+    # ---- 刷新仪表盘（由 QTimer 和 MQTT 信号共同触发）----
 
     def _refresh_dashboard(self):
-        self._dashboard.update_data(
-            self._latest_mw0,
-            self._latest_mw20,
-            self._latest_mw21,
-            self._latest_mw22,
-        )
+        with self._data_lock:
+            mw0 = self._latest_mw0
+            mw20 = self._latest_mw20
+            mw21 = self._latest_mw21
+            mw22 = self._latest_mw22
+        self._dashboard.update_data(mw0, mw20, mw21, mw22)
         # 同时检查 state file 变化（auto_controller.py 可能改了模式）
         mode = load_mode_state(self._state_file)
         if mode != self._current_mode:
@@ -1043,7 +1043,13 @@ class MainWindow(QMainWindow):
             return
 
         # ---- AI 请求 ----
-        if self._latest_mw0 is None:
+        with self._data_lock:
+            mw0 = self._latest_mw0
+            mw20 = self._latest_mw20
+            mw21 = self._latest_mw21
+            mw22 = self._latest_mw22
+
+        if mw0 is None:
             self._chat.add_bubble("还没有收到 PLC 数据，请检查 MQTT 连接。", is_user=False)
             return
 
@@ -1055,11 +1061,11 @@ class MainWindow(QMainWindow):
         self._chat.show_thinking()
         self._ai_worker.set_request(
             self._config,
-            self._latest_mw0,
+            mw0,
             text,
-            self._latest_mw20,
-            self._latest_mw21,
-            self._latest_mw22,
+            mw20,
+            mw21,
+            mw22,
             self._current_mode,
         )
         self._trigger_ai.emit()

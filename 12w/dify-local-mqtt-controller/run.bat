@@ -6,10 +6,10 @@ echo ================================================
 echo   Dify Local MQTT Controller
 echo ================================================
 echo.
-echo   1. Auto Controller + Chat Terminal
+echo   1. Auto Controller + GUI (recommended)
 echo   2. Auto Controller only
 echo   3. Chat Terminal only
-echo   4. GUI Dashboard + Chat
+echo   4. GUI only
 echo.
 set /p choice="Select (1/2/3/4): "
 
@@ -22,7 +22,7 @@ if "%choice%"=="1" (
 ) else if "%choice%"=="4" (
     python main.py gui
 ) else (
-    echo Invalid choice, running both...
+    echo Invalid choice, running auto + GUI...
     python main.py
 )
 pause

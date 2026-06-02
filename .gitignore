@@ -1,0 +1,12 @@
+# API keys and credentials
+config.json
+
+# Runtime state
+controller_state.json
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
