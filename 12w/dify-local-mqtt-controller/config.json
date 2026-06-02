@@ -9,7 +9,7 @@
         "mqtt_version": "3.1.1"
     },
     "deepseek": {
-        "api_key": "sk-ca2ba35803054b38a1d20176c0edefa9",
+        "api_key": "sk-481f9d83ea374b4098497cd70c444184",
         "api_url": "https://api.deepseek.com/v1/chat/completions",
         "model": "deepseek-chat",
         "timeout_sec": 60

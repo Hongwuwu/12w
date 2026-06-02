@@ -65,7 +65,7 @@ DEFAULT_CONFIG = {
         "mqtt_version": "3.1.1",
     },
     "deepseek": {
-        "api_key": "PASTE_DEEPSEEK_API_KEY_HERE",
+        "api_key": "sk-481f9d83ea374b4098497cd70c444184",
         "api_url": "https://api.deepseek.com/v1/chat/completions",
         "model": "deepseek-chat",
         "timeout_sec": 60,
