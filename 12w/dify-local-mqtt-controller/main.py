@@ -32,6 +32,13 @@ def run_chat():
     chat_terminal.main()
 
 
+def run_gui():
+    """运行 PySide6 图形化界面。"""
+    import chat_gui
+
+    chat_gui.main()
+
+
 def main():
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
@@ -39,8 +46,10 @@ def main():
             run_auto()
         elif cmd in ("chat", "terminal"):
             run_chat()
+        elif cmd in ("gui", "graphical"):
+            run_gui()
         else:
-            print(f"Usage: python main.py [auto|chat]")
+            print(f"Usage: python main.py [auto|chat|gui]")
             print(f"       python main.py          (run both)")
             sys.exit(1)
     else:
