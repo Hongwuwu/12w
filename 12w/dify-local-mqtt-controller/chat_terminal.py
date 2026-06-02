@@ -43,6 +43,8 @@ CONFIG_PATH = Path(os.getenv("CHAT_CONFIG", "config.json"))
 
 VERSION = "deepseek-chat-terminal-20260526"
 
+STATUS_UPDATE_INTERVAL = 0.5  # seconds between background data refreshes
+
 running = True
 local_connected = False
 state_lock = threading.Lock()
@@ -222,6 +224,21 @@ def print_status(mw0, mw20, mw21, mw22, mode):
     )
 
 
+def status_updater_loop(state_file, interval=STATUS_UPDATE_INTERVAL):
+    """后台守护线程：静默刷新 latest_* 全局变量，确保主线程随时拿到最新 PLC 数据。"""
+    global running, latest_mw0, latest_mw20, latest_mw21, latest_mw22, state_lock
+    while running:
+        time.sleep(interval)
+        if not running:
+            break
+        # 静默读取最新数据，不输出任何内容
+        with state_lock:
+            _mw0 = latest_mw0
+            _mw20 = latest_mw20
+            _mw21 = latest_mw21
+            _mw22 = latest_mw22
+
+
 def main():
     global running, local_connected, latest_payload, latest_mw0, latest_mw20, latest_mw21, latest_mw22
     global latest_payload_at, current_mode
@@ -306,6 +323,14 @@ def main():
 
     current_mode = load_mode_state(state_file)
 
+    # 启动后台状态更新线程，定时刷新实时数据
+    status_thread = threading.Thread(
+        target=status_updater_loop,
+        args=(state_file,),
+        daemon=True,
+    )
+    status_thread.start()
+
     print_banner(config)
     print(f"\n  Current mode: {current_mode}")
     if not local_connected:
@@ -333,6 +358,14 @@ def main():
 
             if not user_input:
                 continue
+
+            # === 用户输入后刷新实时数据，确保后续处理使用最新状态 ===
+            with state_lock:
+                mw0 = latest_mw0
+                mw20 = latest_mw20
+                mw21 = latest_mw21
+                mw22 = latest_mw22
+            current_mode = load_mode_state(state_file)
 
             # === 本地硬命令（不经过DeepSeek，100%可靠）===
             local_handled = True
@@ -391,6 +424,14 @@ def main():
 
             if local_handled:
                 continue
+
+            # === 调用 AI 前强制刷新最新数据，确保提示词使用实时 PLC 状态 ===
+            with state_lock:
+                mw0 = latest_mw0
+                mw20 = latest_mw20
+                mw21 = latest_mw21
+                mw22 = latest_mw22
+            current_mode = load_mode_state(state_file)
 
             if mw0 is None:
                 print(
