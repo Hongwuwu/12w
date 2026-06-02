@@ -247,23 +247,21 @@ QSplitter::handle {
 #chatBubbleUser {
     background-color: #1a3a5c;
     border: 1px solid #1f4a78;
-    border-radius: 14px;
-    padding: 8px 14px;
+    border-radius: 10px;
 }
 #chatBubbleAI {
     background-color: #1c2333;
     border: 1px solid #30363d;
-    border-radius: 14px;
-    padding: 8px 14px;
+    border-radius: 10px;
 }
 #bubbleText {
     font-size: 13px;
     color: #c9d1d9;
+    line-height: 1.4;
 }
 #bubbleMeta {
-    font-size: 10px;
-    color: #8b949e;
-    margin-top: 4px;
+    font-size: 9px;
+    color: #5a6370;
 }
 
 /* === 系统消息 === */
@@ -402,33 +400,26 @@ class ChatBubble(QFrame):
     def __init__(self, text, is_user=True, parent=None):
         super().__init__(parent)
         self.setObjectName("chatBubbleUser" if is_user else "chatBubbleAI")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
-
-        now = datetime.now().strftime("%H:%M:%S")
+        # Maximum 水平策略 = 气泡宽度由内容决定，不撑满整行
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
 
         inner = QVBoxLayout()
-        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setContentsMargins(12, 8, 12, 8)
         inner.setSpacing(2)
+        self.setLayout(inner)
+
+        now = datetime.now().strftime("%H:%M")
 
         text_label = QLabel(text)
         text_label.setWordWrap(True)
-        text_label.setMaximumWidth(420)
+        text_label.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        text_label.setMaximumWidth(480)
         text_label.setObjectName("bubbleText")
         inner.addWidget(text_label)
 
-        meta = QLabel(f"{'你' if is_user else '小P'} · {now}")
+        meta = QLabel(f"{'你' if is_user else '小P'} {now}")
         meta.setObjectName("bubbleMeta")
         inner.addWidget(meta)
-
-        if is_user:
-            layout.addStretch()
-            layout.addLayout(inner)
-        else:
-            layout.addLayout(inner)
-            layout.addStretch()
 
 
 # ---------------------------------------------------------------------------
@@ -624,23 +615,36 @@ class DashboardPanel(QWidget):
                 tc = "#f85149"
             self.temp_value.setStyleSheet(f"color: {tc};")
         else:
+            temp_f = None
             self.temp_value.setText("--.-")
             self.temp_value.setStyleSheet("color: #8b949e;")
             self.temp_sub.setText("等待 PLC 数据...")
 
-        # 风扇
-        if mw20 is not None:
-            if mw20 == 1:
-                self.fan_status.setText("● 运行中")
-                self.fan_status.setStyleSheet("color: #3fb950; font-size: 15px; font-weight: bold;")
+        # 风扇状态 — 自动模式由 PLC 内部逻辑决定（>30°C 强制开），手动模式看 MW20
+        is_auto = (mw21 == 1)
+        if is_auto and temp_f is not None:
+            fan_on = temp_f > 30.0
+        else:
+            fan_on = (mw20 == 1) if mw20 is not None else None
+
+        if fan_on is True:
+            self.fan_status.setText("● 运行中")
+            self.fan_status.setStyleSheet("color: #3fb950; font-size: 15px; font-weight: bold;")
+            if is_auto:
+                self.fan_detail.setText("PLC 自动控制（温度 > 30°C）")
             else:
-                self.fan_status.setText("○ 已关闭")
-                self.fan_status.setStyleSheet("color: #8b949e; font-size: 15px; font-weight: bold;")
-            self.fan_detail.setText(f"MW20 = {mw20}")
+                self.fan_detail.setText(f"手动 MW20 = {mw20}")
+        elif fan_on is False:
+            self.fan_status.setText("○ 已关闭")
+            self.fan_status.setStyleSheet("color: #8b949e; font-size: 15px; font-weight: bold;")
+            if is_auto:
+                self.fan_detail.setText("PLC 自动控制（温度 ≤ 30°C）")
+            else:
+                self.fan_detail.setText(f"手动 MW20 = {mw20}")
         else:
             self.fan_status.setText("—")
             self.fan_status.setStyleSheet("color: #8b949e; font-size: 15px; font-weight: bold;")
-            self.fan_detail.setText("MW20 = —")
+            self.fan_detail.setText("等待数据…")
 
         # 寄存器
         for name, val in [("MW0", mw0), ("MW20", mw20), ("MW21", mw21), ("MW22", mw22)]:
@@ -742,7 +746,18 @@ class ChatPanel(QWidget):
 
     def add_bubble(self, text, is_user=True):
         bubble = ChatBubble(text, is_user)
-        self.chat_layout.insertWidget(self.chat_layout.count() - 1, bubble)
+        # 包装在行容器中，stretch 推左右对齐（用户 → 右，AI → 左）
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 1, 0, 1)
+        row_layout.setSpacing(0)
+        if is_user:
+            row_layout.addStretch()
+            row_layout.addWidget(bubble)
+        else:
+            row_layout.addWidget(bubble)
+            row_layout.addStretch()
+        self.chat_layout.insertWidget(self.chat_layout.count() - 1, row)
         self._scroll_bottom()
 
     def add_system(self, text):
@@ -895,6 +910,7 @@ class MainWindow(QMainWindow):
                         self._latest_mw21 = mw21
                     if mw22 is not None:
                         self._latest_mw22 = mw22
+                    log(f"GUI input  MW0={mw0} MW21={mw21} MW22={mw22}")
                 elif topic == cmd_topic:
                     mw20, mw21, mw22 = parse_command_payload(payload_text)
                     if mw20 is not None:
@@ -903,6 +919,7 @@ class MainWindow(QMainWindow):
                         self._latest_mw21 = mw21
                     if mw22 is not None:
                         self._latest_mw22 = mw22
+                    log(f"GUI cmd    MW20={mw20} MW21={mw21} MW22={mw22}")
 
             self._emitter.data_updated.emit()
 

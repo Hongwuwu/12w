@@ -284,25 +284,12 @@ def main():
             mw0 = parsed_mw0
         bridge_seq += 1
 
-        try:
-            log(f"Calling DeepSeek seq={bridge_seq} MW0={mw0}")
-            mw20_value, reason = call_deepseek_auto(config, mw0)
-            log(f"DeepSeek response seq={bridge_seq} mw20={mw20_value} reason={reason}")
-        except Exception as exc:
-            log(f"DeepSeek call failed seq={bridge_seq}: {exc}")
-            last_processed_payload = payload_text
-            continue
-
         last_processed_payload = payload_text
 
-        if mw20_value is None:
-            if control_config.get("publish_on_no_action", False):
-                mw20_value = 0
-            else:
-                continue
-
+        # 自动模式下 PLC 内部逻辑接管（MW21=1 → PLC 根据温度自动控制风扇），
+        # 无需调用 AI 判断 MW20，仅发布 MW21=1,MW22=0 维持自动模式即可。
         command_payload = build_command_payload(
-            device_sn, mw20=mw20_value, mw21=1, mw22=0
+            device_sn, mw21=1, mw22=0
         )
 
         if (
