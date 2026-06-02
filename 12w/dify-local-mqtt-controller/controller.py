@@ -30,14 +30,16 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QPushButton, QScrollArea, QSizePolicy,
     QSplitter, QVBoxLayout, QWidget,
 )
@@ -250,7 +252,7 @@ CHAT_SYSTEM_PROMPT = """\
 
 用户输入：{user_query}
 
-只回复JSON：{"text": "中文回复", "mode": null, "mw20": null}
+只回复JSON：{{"text": "中文回复", "mode": null, "mw20": null}}
 
 规则：
 - 自动模式下要求开关 → 先切手动模式再执行
@@ -596,6 +598,7 @@ QWidget { color: #c9d1d9; font-family: "Microsoft YaHei UI", "Segoe UI", sans-se
 QSplitter::handle { background-color: #21262d; width: 2px; }
 
 #dashboardPanel { background-color: #161b22; border-right: 1px solid #21262d; }
+#dashboardScroll { background-color: #161b22; border: none; }
 #dashboardTitle { font-size: 15px; font-weight: bold; color: #58a6ff; padding: 2px 0; }
 #sectionLabel { font-size: 11px; font-weight: bold; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; padding-top: 6px; }
 
@@ -741,7 +744,20 @@ class DashboardPanel(QWidget):
         self.setMinimumWidth(240)
         self.setMaximumWidth(320)
 
-        layout = QVBoxLayout(self)
+        # 外层用 QScrollArea 包裹，窗口高度不足时自动出现滚动条
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setObjectName("dashboardScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        content.setObjectName("dashboardContent")
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
@@ -818,7 +834,15 @@ class DashboardPanel(QWidget):
             self.reg_value_labels[n] = vl
             dl = QLabel(d); dl.setObjectName("registerName"); rcl.addWidget(dl, ri+1, 2)
         layout.addWidget(self.reg_card)
+
+        # 温度趋势图按钮
+        self.btn_trend = QPushButton("📈 温度趋势")
+        self.btn_trend.setObjectName("quickCmdButton")
+        self.btn_trend.setMinimumHeight(34)
+        layout.addWidget(self.btn_trend)
+
         layout.addStretch()
+        scroll.setWidget(content)
 
     def _section(self, text):
         l = QLabel(text); l.setObjectName("sectionLabel"); return l
@@ -972,6 +996,103 @@ class ChatPanel(QWidget):
             self._thinking_bubble.deleteLater()
             self._thinking_bubble = None
 
+# ---- TempChartDialog ----
+
+class TempChartDialog(QDialog):
+    """温度趋势图弹窗。"""
+
+    def __init__(self, temp_history, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📈 手机温度趋势")
+        self.resize(820, 460)
+        self.setMinimumSize(600, 360)
+
+        from PySide6.QtCharts import (
+            QChart, QChartView, QLineSeries, QValueAxis, QDateTimeAxis,
+        )
+
+        chart = QChart()
+        chart.setTitle("手机温度变化趋势")
+        chart.setAnimationOptions(QChart.AnimationOption.SeriesAnimations)
+        chart.setTheme(QChart.ChartTheme.ChartThemeDark)
+        chart.setBackgroundBrush(QColor("#0d1117"))
+        chart.setTitleBrush(QColor("#c9d1d9"))
+        chart.legend().setLabelColor(QColor("#8b949e"))
+
+        # 温度曲线
+        series = QLineSeries()
+        series.setName("温度")
+        series.setColor(QColor("#58a6ff"))
+        pen = series.pen()
+        pen.setWidth(2)
+        series.setPen(pen)
+
+        if temp_history:
+            for ts, temp in temp_history:
+                series.append(ts * 1000, temp)  # QDateTimeAxis 用毫秒
+
+        chart.addSeries(series)
+
+        # X 轴 — 时间
+        axis_x = QDateTimeAxis()
+        axis_x.setFormat("HH:mm:ss")
+        axis_x.setTitleText("时间")
+        axis_x.setLabelsColor(QColor("#8b949e"))
+        axis_x.setTitleBrush(QColor("#8b949e"))
+        axis_x.setGridLineColor(QColor("#21262d"))
+        chart.addAxis(axis_x, Qt.AlignmentFlag.AlignBottom)
+        series.attachAxis(axis_x)
+
+        # Y 轴 — 温度
+        axis_y = QValueAxis()
+        axis_y.setTitleText("温度 (°C)")
+        axis_y.setLabelsColor(QColor("#8b949e"))
+        axis_y.setTitleBrush(QColor("#8b949e"))
+        axis_y.setGridLineColor(QColor("#21262d"))
+        if temp_history:
+            temps = [t for _, t in temp_history]
+            min_t = min(temps) - 2
+            max_t = max(temps) + 2
+            axis_y.setRange(max(0, min_t), min(60, max_t if max_t > 30 else 35))
+        else:
+            axis_y.setRange(0, 40)
+        chart.addAxis(axis_y, Qt.AlignmentFlag.AlignLeft)
+        series.attachAxis(axis_y)
+
+        # 30°C 阈值线
+        if temp_history:
+            threshold_series = QLineSeries()
+            threshold_series.setName("阈值 30°C")
+            threshold_series.setColor(QColor("#f85149"))
+            tpen = threshold_series.pen()
+            tpen.setWidth(1)
+            tpen.setStyle(Qt.PenStyle.DashLine)
+            threshold_series.setPen(tpen)
+            first_ts = temp_history[0][0] * 1000
+            last_ts = temp_history[-1][0] * 1000
+            threshold_series.append(first_ts, 30)
+            threshold_series.append(last_ts, 30)
+            chart.addSeries(threshold_series)
+            threshold_series.attachAxis(axis_x)
+            threshold_series.attachAxis(axis_y)
+
+        chart_view = QChartView(chart)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(chart_view)
+
+        # 关闭按钮
+        btn_close = QPushButton("关闭")
+        btn_close.setObjectName("quickCmdButton")
+        btn_close.clicked.connect(self.close)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(btn_close)
+        btn_row.setContentsMargins(12, 6, 12, 10)
+        layout.addLayout(btn_row)
+
+
 # ---- MainWindow ----
 
 class MainWindow(QMainWindow):
@@ -988,6 +1109,7 @@ class MainWindow(QMainWindow):
         self._latest_mw21 = 0
         self._latest_mw22 = 0
         self._data_lock = threading.Lock()
+        self._temp_history = deque(maxlen=600)  # 温度历史（10 分钟，1 点/秒）
         self._mqtt_connected = False
         self._current_mode = "auto"
         self._pending_ai = False
@@ -1027,6 +1149,13 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 3); splitter.setStretchFactor(1, 7)
         splitter.setHandleWidth(2); root.addWidget(splitter)
         self._dashboard.set_mode(self._current_mode)
+        self._dashboard.btn_trend.clicked.connect(self._show_trend_chart)
+
+    def _show_trend_chart(self):
+        """打开温度趋势图弹窗。"""
+        dlg = TempChartDialog(self._temp_history, self)
+        dlg.setStyleSheet(QSS_THEME)
+        dlg.exec()
 
     def _setup_mqtt(self):
         self._mqtt_client = mqtt.Client(
@@ -1099,6 +1228,9 @@ class MainWindow(QMainWindow):
             mw0, mw20, mw21, mw22 = (self._latest_mw0, self._latest_mw20,
                                        self._latest_mw21, self._latest_mw22)
         self._dashboard.update_data(mw0, mw20, mw21, mw22)
+        # 记录温度历史（用于趋势图）
+        if mw0 is not None:
+            self._temp_history.append((time.time(), mw0 / 100.0))
         mode = load_mode_state(self._state_file)
         if mode != self._current_mode:
             self._current_mode = mode
